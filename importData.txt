@@ -1,0 +1,8 @@
+import kagglehub
+
+# Chỉ định đường dẫn muốn tải dataset về
+download_path = r""  # thay đường dẫn theo ý bạn
+
+path = kagglehub.dataset_download("gti-upm/leapgestrecog", path=download_path)
+
+print("Path to dataset files:", path)

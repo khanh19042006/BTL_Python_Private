@@ -1,6 +1,7 @@
 import cv2
 from dotenv import load_dotenv
 import os
+import Euclidean
 # import mediapipe as mp
 # from mediapipe.tasks import python
 # from mediapipe.tasks.python import vision
@@ -45,6 +46,7 @@ def detect_hands_new_api(frame):
     # Vẽ landmarks
     if detection_result.hand_landmarks:
         for hand_landmarks in detection_result.hand_landmarks:
+            print(Euclidean.calculate_threshold(hand_landmarks))
             # Vẽ các điểm landmarks
             for landmark in hand_landmarks:
                 x = int(landmark.x * frame.shape[1])
@@ -99,6 +101,7 @@ def count_fingers_new_api(hand_landmarks, handedness):
             fingers.append(1)
         else:
             fingers.append(0)
+
 
     # Các ngón khác
     for id in range(1, 5):

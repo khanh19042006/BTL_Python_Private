@@ -36,3 +36,4 @@ threadpoolctl==3.6.0
 tqdm==4.67.1
 urllib3==2.6.3
 zipp==3.23.0
+pyautogui==0.9.54

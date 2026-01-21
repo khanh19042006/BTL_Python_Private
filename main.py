@@ -1,190 +1,193 @@
 import cv2
-from dotenv import load_dotenv
+import mediapipe as mp
+import pyautogui
+import numpy as np
+import time
 import os
-import Euclidean
-# import mediapipe as mp
-# from mediapipe.tasks import python
-# from mediapipe.tasks.python import vision
+from dotenv import load_dotenv
 
-load_dotenv()
+from mediapipe.tasks import python
+from mediapipe.tasks.python import vision
 
-try:
-    import mediapipe as mp
-    from mediapipe.tasks import python
-    from mediapipe.tasks.python import vision
+# Tắt failsafe pyautogui (cẩn thận, chỉ dùng trong test)
+pyautogui.FAILSAFE = False
+pyautogui.PAUSE = 0.01  # Giảm độ trễ nhỏ
 
-    model_path = "hand_landmarker.task"
+# Biến EMA smoothing
+prev_x = prev_y = None
+smoothing_factor = 0.2
 
-    base_options = python.BaseOptions(model_asset_path=model_path)
-    options = vision.HandLandmarkerOptions(
-            base_options=base_options,
-            num_hands=2,
-            min_hand_detection_confidence=0.5,
-            min_hand_presence_confidence=0.5,
-            min_tracking_confidence=0.5
-        )
-    hand_landmarker = vision.HandLandmarker.create_from_options(options)
+# --- KHỞI TẠO HAND LANDMARKER (Tasks API) ---
+BaseOptions = python.BaseOptions
+HandLandmarker = vision.HandLandmarker
+HandLandmarkerOptions = vision.HandLandmarkerOptions
+VisionRunningMode = vision.RunningMode
 
-    USE_NEW_API = True
-except ImportError as e:
-    exit(1)
+model_path = "hand_landmarker.task"  # Tự động tải về nếu chưa có (~30-50MB)
 
-# nếu bạn dùng cam máy tính thì droidcamp = 0
-droidcamp = os.getenv("URL_SCREEN")
+options = HandLandmarkerOptions(
+    base_options=BaseOptions(model_asset_path=model_path),
+    running_mode=VisionRunningMode.VIDEO,
+    num_hands=1,
+    min_hand_detection_confidence=0.7,
+    min_hand_presence_confidence=0.5,
+    min_tracking_confidence=0.7
+)
 
-#Kết nối camera
-def connect_to_droidcam():
-    return cv2.VideoCapture(droidcamp)
+landmarker = HandLandmarker.create_from_options(options)
 
-def detect_hands_new_api(frame):
-    # Chuyển BGR sang RGB
-    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
-    # Phát hiện bàn tay
-    detection_result = hand_landmarker.detect(mp_image)
+# Danh sách kết nối landmarks tay (21 điểm) - chuẩn từ MediaPipe
+HAND_CONNECTIONS = [
+    (0, 1), (1, 2), (2, 3), (3, 4),       # Ngón cái
+    (0, 5), (5, 6), (6, 7), (7, 8),       # Ngón trỏ
+    (5, 9), (9, 13), (13, 17), (0, 17),   # Lòng bàn tay
+    (9, 10), (10, 11), (11, 12),          # Ngón giữa
+    (13, 14), (14, 15), (15, 16),         # Ngón áp út
+    (17, 18), (18, 19), (19, 20)          # Ngón út
+]
 
-    # Vẽ landmarks
-    if detection_result.hand_landmarks:
-        for hand_landmarks in detection_result.hand_landmarks:
-            print(Euclidean.calculate_threshold(hand_landmarks))
-            # Vẽ các điểm landmarks
-            for landmark in hand_landmarks:
-                x = int(landmark.x * frame.shape[1])
-                y = int(landmark.y * frame.shape[0])
-                cv2.circle(frame, (x, y), 5, (0, 255, 0), -1)
+def draw_hand_landmarks(frame, hand_landmarks):
+    """Vẽ 21 landmarks + đường nối thủ công bằng OpenCV (không dùng drawing_utils)"""
+    if not hand_landmarks:
+        return
 
-            # Vẽ connections (21 điểm)
-            connections = [
-                [0, 1], [1, 2], [2, 3], [3, 4],  # Thumb
-                [0, 5], [5, 6], [6, 7], [7, 8],  # Index
-                [5, 9], [9, 10], [10, 11], [11, 12],  # Middle
-                [9, 13], [13, 14], [14, 15], [15, 16],  # Ring
-                [13, 17], [17, 18], [18, 19], [19, 20], [0, 17]  # Pinky
-            ]
+    h, w, _ = frame.shape
 
-            for connection in connections:
-                start_idx, end_idx = connection
-                start_point = (int(hand_landmarks[start_idx].x * frame.shape[1]),
-                               int(hand_landmarks[start_idx].y * frame.shape[0]))
-                end_point = (int(hand_landmarks[end_idx].x * frame.shape[1]),
-                             int(hand_landmarks[end_idx].y * frame.shape[0]))
-                cv2.line(frame, start_point, end_point, (0, 255, 0), 2)
+    # Vẽ các điểm (xanh lá)
+    for lm in hand_landmarks:
+        cx, cy = int(lm.x * w), int(lm.y * h)
+        cv2.circle(frame, (cx, cy), 5, (0, 255, 0), cv2.FILLED)
 
-            # Đếm số ngón tay
-            finger_count = count_fingers_new_api(hand_landmarks, detection_result.handedness[
-                detection_result.hand_landmarks.index(hand_landmarks)])
+    # Vẽ đường nối (đỏ)
+    for conn in HAND_CONNECTIONS:
+        start_idx, end_idx = conn
+        if start_idx < len(hand_landmarks) and end_idx < len(hand_landmarks):
+            start_lm = hand_landmarks[start_idx]
+            end_lm = hand_landmarks[end_idx]
+            x1, y1 = int(start_lm.x * w), int(start_lm.y * h)
+            x2, y2 = int(end_lm.x * w), int(end_lm.y * h)
+            cv2.line(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
 
-            # Hiển thị số ngón tay
-            h, w = frame.shape[:2]
-            x = int(hand_landmarks[0].x * w)
-            y = int(hand_landmarks[0].y * h)
-            cv2.putText(frame, f"Fingers: {finger_count}", (x - 50, y - 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+def count_fingers(landmarks_list):
+    """Đếm số ngón tay giơ lên (logic tương tự code cũ)"""
+    if not landmarks_list:
+        return 0
+    landmarks = landmarks_list[0]  # Chỉ xử lý 1 tay
 
-    return frame, detection_result
-
-def count_fingers_new_api(hand_landmarks, handedness):
-    """Đếm số ngón tay"""
-    tip_ids = [4, 8, 12, 16, 20]
+    tip_ids = [4, 8, 12, 16, 20]  # thumb, index, middle, ring, pinky
     fingers = []
 
-    is_right = handedness[0].category_name == "Right"
-
-    # Thumb
-    if is_right:
-        if hand_landmarks[tip_ids[0]].x > hand_landmarks[tip_ids[0] - 1].x:
-            fingers.append(1)
-        else:
-            fingers.append(0)
+    # Ngón cái: dùng x (phù hợp khi tay hướng phải/trái)
+    if landmarks[tip_ids[0]].x > landmarks[tip_ids[0] - 1].x:
+        fingers.append(1)
     else:
-        if hand_landmarks[tip_ids[0]].x < hand_landmarks[tip_ids[0] - 1].x:
-            fingers.append(1)
-        else:
-            fingers.append(0)
+        fingers.append(0)
 
-
-    # Các ngón khác
-    for id in range(1, 5):
-        if hand_landmarks[tip_ids[id]].y < hand_landmarks[tip_ids[id] - 2].y:
+    # 4 ngón còn lại: dùng y
+    for i in range(1, 5):
+        if landmarks[tip_ids[i]].y < landmarks[tip_ids[i] - 2].y:
             fingers.append(1)
         else:
             fingers.append(0)
 
     return sum(fingers)
 
-def main():
-    print("=" * 50)
-    print("HAND DETECTION VỚI DROIDCAM")
-    print("=" * 50)
 
-    # Kết nối đến DroidCam
-    cap = connect_to_droidcam()
-    if cap is None:
+def main():
+    global prev_x, prev_y
+
+    print("=" * 60)
+    print("HAND TRACKING MOUSE CONTROL - MediaPipe Tasks API (2026 compatible)")
+    print("Di chuyển chuột bằng ngón trỏ")
+    print("Giơ đúng 1 ngón tay để click trái")
+    print("Nhấn 'q' để thoát")
+    print("=" * 60)
+
+    load_dotenv()
+    droicam = os.getenv("URL_SCREEN")
+    if not droicam:
+        print("Lỗi: Chưa có URL_SCREEN")
+        exit()
+    cap = cv2.VideoCapture(droicam)
+    if not cap.isOpened():
+        print("Lỗi: Không mở được camera.")
         return
 
-    # Thiết lập độ phân giải và FPS (giam de giam do tre)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
-    cap.set(cv2.CAP_PROP_FPS, 24)
-    # Thu nho buffer de giam do tre tu stream
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
-    print("\nNhấn 'q' để thoát")
-    print("Đang xử lý video...\n")
+    prev_frame_time = time.time()
 
-    frame_count = 0
-    fps_start_time = cv2.getTickCount()
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            print("Không đọc được frame.")
+            break
 
-    try:
-        while True:
-            ret, frame = cap.read()
+        frame = cv2.flip(frame, 1)  # Lật ngang (gương)
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-            if not ret or frame is None:
-                print("Không thể đọc frame từ DroidCam")
-                break
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+        timestamp_ms = int(time.time() * 1000)
 
-            # Nhận diện bàn tay
-            processed_frame, results = detect_hands_new_api(frame)
+        result = landmarker.detect_for_video(mp_image, timestamp_ms)
 
-            # Tính FPS
-            frame_count += 1
-            if frame_count % 30 == 0:
-                fps_end_time = cv2.getTickCount()
-                fps = 30.0 / ((fps_end_time - fps_start_time) / cv2.getTickFrequency())
-                fps_start_time = fps_end_time
+        finger_count = 0
 
-                if USE_NEW_API:
-                    hand_count = len(results.hand_landmarks) if results.hand_landmarks else 0
+        if result.hand_landmarks:
+            for hand_landmarks in result.hand_landmarks:
+                draw_hand_landmarks(frame, hand_landmarks)
+
+                # Lấy tọa độ đầu ngón trỏ (landmark 8)
+                index_tip = hand_landmarks[8]
+
+                screen_w, screen_h = pyautogui.size()
+                margin = 0.1
+                nav_start_x = screen_w * margin
+                nav_end_x   = screen_w * (1 - margin)
+                nav_start_y = screen_h * margin
+                nav_end_y   = screen_h * (1 - margin)
+
+                target_x = np.interp(index_tip.x, [0, 1], [nav_start_x, nav_end_x])
+                target_y = np.interp(index_tip.y, [0, 1], [nav_start_y, nav_end_y])
+
+                # EMA làm mượt chuyển động
+                if prev_x is None:
+                    prev_x, prev_y = target_x, target_y
                 else:
-                    hand_count = len(results.multi_hand_landmarks) if results.multi_hand_landmarks else 0
+                    prev_x = smoothing_factor * target_x + (1 - smoothing_factor) * prev_x
+                    prev_y = smoothing_factor * target_y + (1 - smoothing_factor) * prev_y
 
-                print(f"FPS: {fps:.2f} | Hands detected: {hand_count}")
+                pyautogui.moveTo(int(prev_x), int(prev_y), duration=0)
 
-            # Hiển thị số bàn tay
-            if USE_NEW_API:
-                hand_count = len(results.hand_landmarks) if results.hand_landmarks else 0
-            else:
-                hand_count = len(results.multi_hand_landmarks) if results.multi_hand_landmarks else 0
+                # Đếm ngón & click nếu = 1
+                finger_count = count_fingers(result.hand_landmarks)
 
-            cv2.putText(processed_frame, f"Hands: {hand_count}", (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
+                if finger_count == 1:
+                    pyautogui.click()
+                    time.sleep(0.15)  # Tránh click liên tục
 
-            # Hiển thị frame
-            cv2.imshow("Hand Detection - DroidCam", processed_frame)
+        # Hiển thị số ngón + FPS
+        cv2.putText(frame, f"Fingers: {finger_count}", (10, 70),
+                    cv2.FONT_HERSHEY_PLAIN, 2, (255, 0, 0), 2)
 
-            # Thoát khi nhấn 'q'
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
+        curr_time = time.time()
+        fps = 1 / (curr_time - prev_frame_time) if curr_time > prev_frame_time else 0
+        prev_frame_time = curr_time
+        cv2.putText(frame, f"FPS: {int(fps)}", (10, 30),
+                    cv2.FONT_HERSHEY_PLAIN, 2, (0, 255, 0), 2)
 
-    except KeyboardInterrupt:
-        print("\nĐang dừng...")
-    finally:
-        # Giải phóng tài nguyên
-        cap.release()
-        cv2.destroyAllWindows()
-        if USE_NEW_API:
-            hand_landmarker.close()
-        print("Đã đóng kết nối.")
+        cv2.imshow("Hand Mouse Control", frame)
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    # Giải phóng
+    cap.release()
+    cv2.destroyAllWindows()
+    landmarker.close()
+    print("Chương trình đã dừng. Tài nguyên đã giải phóng.")
+
 
 if __name__ == "__main__":
     main()
